@@ -1,0 +1,569 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+np.set_printoptions(threshold=np.inf, suppress=True)#To print long tables (slots) we can see them all
+
+filename = r'C:\MARTA PRADA\UNI\ANY 3\MGTA\checkpoint4.1\LIRF_10AUG2025_2111.csv'
+airport = 'LIRF'
+AAR = 49  # nominal arrival capacity (flights/h)
+PAAR = 20  # reduced arrival capacity (flights/h)
+Hstart = 8  # start of reduced capacity (h)
+Hend = 13  # end of reduced capacity (h)
+Hfile = Hstart - 2  # time when the regulation is filed (h)
+radius = 1000  # exemption radius (km)
+margin = 30  # flights leaving less than 30 min after Hfile count as airborne
+
+# APU fuel burnt at the gate (kg/h) per RECAT-EU category (A = largest, F = smallest)
+apu_fuel = {'A': 500.0, 'B': 300.0, 'C': 220.0, 'D': 130.0, 'E': 60.0, 'F': 0.0}
+
+"""
+Aircraft Emissions Modeling Library
+==================================
+
+Provides functions to estimate emissions per Available Seat Kilometer (ASK) for various aircraft types
+based on flight distance and number of available seats.
+"""
+
+
+def compute_fuel_ask(distance_km: float, available_seats: int, force: bool = False) -> float:
+    """
+    Estimate the fuel consumption per Available Seat Kilometer (ASK).
+
+    Equation 1: Small aircraft (50–172 seats, 100–5,000 km)
+    Equation 2: Large aircraft (172–365 seats, 200–12,000 km)
+
+    Parameters:
+        distance_km (float): Flight distance in kilometers.
+        available_seats (int): Number of available seats.
+        force (bool): If True, bypasses range checks. Defaults to False.
+
+    Returns:
+        float: Estimated fuel consumption per ASK (rounded to 2 decimals) in gFuel/ASK.
+
+    Raises:
+        ValueError: On invalid inputs unless force=True.
+    """
+
+    def validate_inputs():
+        if not (50 <= available_seats <= 365) and not force:
+            raise ValueError("Seats available out of range (50 - 365)")
+        if not (100 <= distance_km <= 12000) and not force:
+            raise ValueError("Distance out of range (100 - 12,000 km)")
+        if distance_km > 5000 and available_seats < 172 and not force:
+            raise ValueError("Flights over 5,000 km require at least 172 seats")
+        if available_seats >= 172 and distance_km < 200 and not force:
+            raise ValueError("Flights under 200 km are invalid for aircraft with 172+ seats")
+
+    def should_use_eq3():
+        if not force:
+            return 172 <= available_seats <= 365 and 200 <= distance_km <= 12000
+        return available_seats >= 172 or abs(available_seats - 172) < abs(available_seats - 50)
+
+    validate_inputs()
+    use_eq3 = should_use_eq3()
+
+    if use_eq3:
+        # Equation 3
+        fuel_ask = (
+                0.7361 + 6651 / distance_km + 5.989e-4 * distance_km +
+                6.152e-2 * available_seats - 1.014e-6 * distance_km * available_seats
+        )
+    else:
+        # Equation 2
+        fuel_ask = (
+                34.67 + 6608 / distance_km - 1.196e-3 * distance_km -
+                0.1354 * available_seats + 1.338e-5 * distance_km * available_seats
+        )
+
+    return round(fuel_ask, 2)
+
+
+def compute_co2_ask(distance_km: float, available_seats: int, force: bool = False) -> float:
+    """
+    Estimate CO₂ emissions per ASK by scaling fuel consumption.
+
+    Parameters:
+        distance_km (float): Flight distance in kilometers.
+        available_seats (int): Number of available seats.
+        force (bool): If True, bypass validation in fuel model. Defaults to False.
+
+    Returns:
+        float: Estimated CO₂ emissions per ASK (rounded to 2 decimals) in gCO2/ASK.
+    """
+    co2_kg_per_kg_fuel = 3.16
+    return round(compute_fuel_ask(distance_km, available_seats, force) * co2_kg_per_kg_fuel, 2)
+
+
+def compute_sox_ask(distance_km: float, available_seats: int, force: bool = False) -> float:
+    """
+    Estimate SOₓ emissions per ASK by scaling fuel consumption.
+
+    Parameters:
+        distance_km (float): Flight distance in kilometers.
+        available_seats (int): Number of available seats.
+        force (bool): If True, bypass validation in fuel model. Defaults to False.
+
+    Returns:
+        float: Estimated SOₓ emissions per ASK (rounded to 2 decimals) in gSOx/ASK.
+    """
+    sox_kg_per_kg_fuel = 0.84 / 1000
+    return round(compute_fuel_ask(distance_km, available_seats, force) * sox_kg_per_kg_fuel, 2)
+
+
+def compute_water_vapour_ask(distance_km: float, available_seats: int, force: bool = False) -> float:
+    """
+    Estimate water vapour emissions per ASK by scaling fuel consumption.
+
+    Parameters:
+        distance_km (float): Flight distance in kilometers.
+        available_seats (int): Number of available seats.
+        force (bool): If True, bypass validation in fuel model. Defaults to False.
+
+    Returns:
+        float: Estimated water vapour emissions per ASK (rounded to 2 decimals) in gSOx/ASK.
+    """
+    water_vapour_kg_per_kg_fuel = 1.237
+    return round(compute_fuel_ask(distance_km, available_seats, force) * water_vapour_kg_per_kg_fuel, 2)
+
+
+def compute_nox_ask(distance_km: float, available_seats: int, force: bool = False) -> float:
+    """
+    Estimate NOₓ emissions per ASK.
+
+    Equation 4: Small aircraft (50–172 seats, 100–5,000 km)
+    Equation 5: Large aircraft (172–365 seats, 200–12,000 km)
+
+    Parameters:
+        distance_km (float): Flight distance in kilometers.
+        available_seats (int): Number of available seats.
+        force (bool): If True, bypass validation. Defaults to False.
+
+    Returns:
+        float: Estimated NOₓ emissions per ASK (rounded to 2 decimals) in gNOx/ASK.
+
+    Raises:
+        ValueError: On invalid inputs unless force=True.
+    """
+
+    def validate_inputs():
+        if not (50 <= available_seats <= 365) and not force:
+            raise ValueError("Seats available out of range (50 - 365)")
+        if not (100 <= distance_km <= 12000) and not force:
+            raise ValueError("Distance out of range (100 - 12,000 km)")
+        if distance_km > 5000 and available_seats < 172 and not force:
+            raise ValueError("Flights over 5,000 km require at least 172 seats")
+        if available_seats >= 172 and distance_km < 200 and not force:
+            raise ValueError("Flights under 200 km are invalid for aircraft with 172+ seats")
+
+    def should_use_eq5():
+        if not force:
+            return 172 <= available_seats <= 365 and 200 <= distance_km <= 12000
+        return available_seats >= 172 or abs(available_seats - 172) < abs(available_seats - 50)
+
+    validate_inputs()
+    use_eq5 = should_use_eq5()
+
+    if use_eq5:
+        # Equation 5
+        nox_ask = (
+                -1.427 + 152.1 / distance_km + 143.5 / available_seats +
+                3.625e-6 * distance_km + 4.18e-3 * available_seats
+        )
+    else:
+        # Equation 4
+        nox_ask = (
+                0.1512 + 63.34 / distance_km + 0.2954 / available_seats +
+                2.214e-6 * distance_km + 6.217e-4 * available_seats
+        )
+
+    return round(nox_ask, 2)
+
+
+def compute_co_ask(distance_km: float, available_seats: int, force: bool = False) -> float:
+    """
+    Estimate carbon monoxide (CO) emissions per ASK.
+
+    Equation 6: Small aircraft (50–172 seats, 100–5,000 km)
+    Equation 7: Large aircraft (172–365 seats, 200–12,000 km)
+
+    Parameters:
+        distance_km (float): Flight distance in kilometers.
+        available_seats (int): Number of available seats.
+        force (bool): If True, bypass validation. Defaults to False.
+
+    Returns:
+        float: Estimated CO emissions per ASK (rounded to 2 decimals) in gCO/ASK.
+
+    Raises:
+        ValueError: On invalid inputs unless force=True.
+    """
+
+    def validate_inputs():
+        if not (172 <= available_seats <= 365) and not force:
+            raise ValueError("Seats available out of range (172 - 365)")
+        if not (200 <= distance_km <= 12000) and not force:
+            raise ValueError("Distance out of range (200 - 12,000 km)")
+
+    def should_use_eq7():
+        if not force:
+            return 172 <= available_seats <= 365 and 200 <= distance_km <= 12000
+        return available_seats >= 172 or abs(available_seats - 172) < abs(available_seats - 50)
+
+    validate_inputs()
+    use_eq7 = should_use_eq7()
+
+    if use_eq7:
+        # Equation 7
+        co_ask = (
+                -0.5736 + 65.11 / distance_km + 51.85 / available_seats +
+                2.489e-5 * distance_km + 1.411e-3 * available_seats -
+                8.39e-8 * distance_km * available_seats
+        )
+    else:
+        # Equation 6
+        co_ask = (
+                0.08338 + 96.54 / distance_km + 2.184 / available_seats +
+                2.433e-6 * distance_km - 8.602e-4 * available_seats -
+                6.053e-8 * distance_km * available_seats
+        )
+
+    return round(co_ask, 2)
+
+
+def readArrivals(filename):
+    df = pd.read_csv(filename, sep=';')
+    arr = df[df['ADES'] == airport].copy()
+    arr['ETA_min'] = pd.to_timedelta(arr['ETA']).dt.total_seconds() / 60
+    arr['ETD_min'] = pd.to_timedelta(arr['ETD']).dt.total_seconds() / 60
+    arr.loc[arr['ETD_min'] > arr['ETA_min'], 'ETD_min'] -= (
+        1440  # flight left the day before
+    )
+    arr['NonECAC'] = (
+        arr['ECAC SI/No'].astype(str).str.strip() == 'Fuera de ECAC'
+    )
+
+    # --- CANVI AQUÍ: Llegim directament els seients del CSV ---
+    arr['Seats'] = pd.to_numeric(arr['Available seats'], errors='coerce')
+
+    if 'Compañía' not in arr.columns:
+        arr['Compañía'] = arr['ARCID'].str[
+            :3
+        ]  # airline taken from the flight number
+
+    # Sort by ETA and use the position in that list as flight ID (1, 2, 3, ...)
+    arr = arr.sort_values('ETA_min').reset_index(drop=True)
+    arr.index = arr.index + 1
+    return arr
+
+
+def computeHNoReg(eta):#Calculates minute per minute the arrived planes & how many could have landed with the avaiable capacity
+    t = np.arange(0, 1441)  # every minute of the day
+    demand = np.array([np.sum(eta <= x) for x in t])  # aircraft arrived up to minute x
+    capacity = demand.astype(float)  # before Hstart capacity = demand
+    d0 = demand[Hstart * 60]
+    during = (t > Hstart * 60) & (t <= Hend * 60)
+    after = t > Hend * 60
+    capacity[during] = d0 + (t[during] - Hstart * 60) * PAAR / 60
+    capacity[after] = d0 + (Hend - Hstart) * PAAR + (t[after] - Hend * 60) * AAR / 60
+    HNoReg = t[(t >= Hend * 60) & (capacity >= demand)][0]  # capacity catches up with demand
+    queue = np.maximum(demand - capacity, 0)  # aircraft waiting at each minute
+    total_delay = queue[(t >= Hstart * 60) & (t <= HNoReg)].sum()
+    return t, demand, capacity, HNoReg, total_delay
+
+
+def computeSlots(HNoReg):
+    slots = []
+    time = Hstart * 60.0
+    while time <= HNoReg + 60:  # one extra hour of slots as a safety margin
+        slots.append([round(time, 2), 0, 0])
+        time += 60 / PAAR if time < Hend * 60 else 60 / AAR
+    return np.array(slots, dtype=object)  # columns: slot time, flight ID, airline
+
+
+def determineFlightStatus(arr, Hfile, HNoReg, radius):
+    NotAffected, ExemptRadius, ExemptInternational, ExemptFlying, Controlled = [], [], [], [], []
+    for i, f in arr.iterrows():
+        if f['ETA_min'] < Hstart * 60 or f['ETA_min'] > HNoReg:
+            NotAffected.append(i)
+        elif f['Distance'] > radius:
+            ExemptRadius.append(i)
+        elif f['NonECAC']:
+            ExemptInternational.append(i)
+        elif f['ETD_min'] < Hfile * 60 + margin:
+            ExemptFlying.append(i)
+        else:
+            Controlled.append(i)
+    Exempt = ExemptRadius + ExemptInternational + ExemptFlying
+    return NotAffected, ExemptRadius, ExemptInternational, ExemptFlying, Exempt, Controlled
+
+
+def assignSlotsGDP(slots, Controlled, Exempt, arr):
+    slot_time = slots[:, 0].astype(float)
+    used = np.zeros(len(slots), dtype=bool)
+    CTA = arr['ETA_min'].copy()
+    GroundDelay = []
+    AirDelay = []
+    # IDs follow ETA order, so sorting the IDs gives exempt flights first, then controlled
+    for i in sorted(Exempt) + sorted(Controlled):
+        eta = arr.loc[i, 'ETA_min']
+        free = np.where(~used & (slot_time >= eta))[0]  # free slots not earlier than the ETA
+        if len(free) == 0:
+            print(f'Warning: no slot left for flight {i}')
+            continue
+        k = free[0]
+        used[k] = True
+        slots[k, 1] = i
+        slots[k, 2] = arr.loc[i, 'Compañía']
+        CTA[i] = slot_time[k]
+        delay = round(float(slot_time[k] - eta), 2)
+        if i in Controlled:
+            GroundDelay.append([i, delay])
+        else:
+            AirDelay.append([i, delay])
+    return slots, np.array(GroundDelay, dtype=object), np.array(AirDelay, dtype=object), CTA
+
+
+def unrecoverableDelay(arr, GroundDelay):
+    unrec = []
+    for i, gd in GroundDelay:
+        etd = arr.loc[i, 'ETD_min']
+        if etd >= Hstart * 60:  # case 1: the flight had not left, all delay recovered
+            u = 0.0
+        elif etd + gd <= Hstart * 60:  # case 2: the whole delay was already spent
+            u = gd
+        else:  # case 3: only the part before Hstart is lost
+            u = Hstart * 60 - etd
+        unrec.append([i, round(float(u), 2)])
+    return np.array(unrec, dtype=object)
+
+
+def airEmissions(arr, AirDelay):
+    fuel, co2, nox, sox, h2o, co = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    for i, delay in AirDelay:
+        f = arr.loc[i]
+        if pd.isna(f[['Distance', 'Seats', 'Mean velocity (kts)']]).any() or f['Distance'] <= 0:
+            continue
+        km_per_min = f['Mean velocity (kts)'] * 1.852 / 60
+        seat_km = f['Seats'] * km_per_min * delay  # seat-km flown while holding
+
+        # Càlcul de totes les emissions (convertint de g a kg quan pertoca)
+        fuel += compute_fuel_ask(f['Distance'], f['Seats'], force=True) * seat_km / 1000
+        co2 += compute_co2_ask(f['Distance'], f['Seats'], force=True) * seat_km / 1000
+        nox += compute_nox_ask(f['Distance'], f['Seats'], force=True) * seat_km / 1000
+        sox += compute_sox_ask(f['Distance'], f['Seats'], force=True) * seat_km / 1000
+        h2o += compute_water_vapour_ask(f['Distance'], f['Seats'], force=True) * seat_km / 1000
+        co += compute_co_ask(f['Distance'], f['Seats'], force=True) * seat_km / 1000
+
+    return fuel, co2, nox, sox, h2o, co  # kg
+
+
+def groundEmissions(arr, GroundDelay):
+    fuel = 0.0
+    for i, delay in GroundDelay:
+        cat = str(arr.loc[i, 'Category']).strip().upper()
+        # Consum en kg segons el temps de retard de l'APU
+        fuel += apu_fuel.get(cat, apu_fuel['D']) * delay / 60
+    # Factors d'emissió (kg d'emissió per kg de fuel cremats per l'APU)
+    co2 = fuel * 3.16
+    h2o = fuel * 1.237
+    sox = fuel * 0.00084
+    nox = fuel * 0.0022  # Factor mitjà típic APU (2.2 g/kg)
+    co = fuel * 0.0105   # Factor mitjà típic APU (10.5 g/kg)
+    return fuel, co2, nox, sox, h2o, co  # tots en kg
+
+def gdpKPIs(arrivals, Hfile, radius, HNoReg):#Juntem les funcions anteriors, apliquem el gdp per un valor Hfile i radi i retorna 6 indicadors dels mapes de calor
+    status = determineFlightStatus(arrivals, Hfile, HNoReg, radius)
+    #5 -> ControlledFlight 4->Exempt
+    slots, GroundDelay, AirDelay, CTA = assignSlotsGDP(computeSlots(HNoReg), status[5], status[4], arrivals)
+    min_airdelay = sum(d for _, d in AirDelay)
+    min_groundelay = sum(d for _, d in GroundDelay)
+    min_unrecoverableDelay = sum(u for _, u in unrecoverableDelay(arrivals, GroundDelay))
+    co2_air = airEmissions(arrivals, AirDelay)[1]
+    co2_ground = groundEmissions(arrivals, GroundDelay)[1]
+    return [min_airdelay, min_groundelay, min_unrecoverableDelay, co2_air, co2_ground, co2_air + co2_ground]
+
+# To this:
+def delayStats(delay_list):
+    # Extract only the delay minutes column and convert it into a numeric array
+    delay_minutes = np.array([flight[1] for flight in delay_list], dtype=float)
+    if len(delay_minutes) == 0:
+        return 0.0, 0.0, 0.0, 0.0
+    # Calculate the 4 statistical metrics
+    total_delay_minutes = delay_minutes.sum()
+    maximum_delay_minutes = delay_minutes.max()
+    mean_delay_minutes = delay_minutes.mean()
+    # Relative standard deviation (%) to measure dispersion
+    standard_deviation = delay_minutes.std()
+    relative_std_percent = (100 * standard_deviation / mean_delay_minutes) if mean_delay_minutes > 0 else 0.0
+    return total_delay_minutes, maximum_delay_minutes, mean_delay_minutes, relative_std_percent
+
+def plotHistogram(hours, title):
+    plt.figure()
+    plt.hist(hours, bins=np.arange(0, 25, 1), edgecolor='black')
+    plt.plot([0, Hstart], [AAR, AAR], 'g-', linewidth=3, label=f'AAR = {AAR}')
+    plt.plot([Hend, 24], [AAR, AAR], 'g-', linewidth=3)
+    plt.plot([Hstart, Hend], [PAAR, PAAR], 'r-', linewidth=3, label=f'PAAR = {PAAR}')
+    plt.xlabel('Time [h]')
+    plt.ylabel('Number of arrivals')
+    plt.title(title)
+    plt.xlim(0, 24)
+    plt.grid(True)
+    plt.legend(loc='upper left')
+
+
+# Checkpoints 1 and 2: demand, aggregate curves and HNoReg
+arrivals = readArrivals(filename)
+plotHistogram(arrivals['ETA_min'] / 60, f'Arrival demand at {airport} (initial)')
+
+t, demand, capacity, HNoReg, total_delay = computeHNoReg(arrivals['ETA_min'].values)
+affected = np.sum((arrivals['ETA_min'] >= Hstart * 60) & (arrivals['ETA_min'] <= HNoReg))
+print(f'HNoReg: {HNoReg // 60:02d}:{HNoReg % 60:02d} h')
+print(f'Theoretical total delay: {total_delay:.2f} min')
+print(f'Affected flights: {affected}')
+print(f'Theoretical average delay: {total_delay / affected:.2f} min/flight')
+
+plt.figure()
+plt.plot(t / 60, demand, 'g-', linewidth=2, label='Aggregate demand')
+plt.plot(t / 60, np.minimum(capacity, demand), 'r:', linewidth=2, label='Aggregate capacity')
+for x, c, name in [(Hfile, 'gray', 'Hfile'), (Hstart, 'orange', 'Hstart'),
+                   (Hend, 'purple', 'Hend'), (HNoReg / 60, 'blue', 'HNoReg')]:
+    plt.axvline(x=x, color=c, linestyle='--', label=name)
+plt.xlabel('Time [h]')
+plt.ylabel('Cumulative number of aircraft')
+plt.title('Aggregate demand and capacity')
+plt.xlim(0, 24)
+plt.grid(True)
+plt.legend(loc='upper left')
+
+# Checkpoint 3: GDP with the initial Hfile and radius
+NotAffected, ExemptRadius, ExemptInternational, ExemptFlying, Exempt, Controlled = \
+    determineFlightStatus(arrivals, Hfile, HNoReg, radius)
+slots, GroundDelay, AirDelay, CTA = assignSlotsGDP(computeSlots(HNoReg), Controlled, Exempt, arrivals)
+arrivals['CTA_min'] = CTA
+
+print(f'\nNot affected flights: {len(NotAffected)}')
+print(f'Controlled flights: {len(Controlled)}')
+print(f'Exempt flights: {len(Exempt)} (radius {len(ExemptRadius)}, non-ECAC '
+      f'{len(ExemptInternational)}, airborne {len(ExemptFlying)})')
+for name, delays in [('Ground', GroundDelay), ('Air', AirDelay)]:
+    total, maximum, mean, rel_std = delayStats(delays)
+    print(f'{name} delay: total {total:.2f} min, max {maximum:.2f} min, '
+          f'mean {mean:.2f} min, relative std {rel_std:.1f} %')
+print(f'Total delay (ground + air): {delayStats(GroundDelay)[0] + delayStats(AirDelay)[0]:.2f} min')
+print('\nGroundDelay [ID, min] =')
+print(GroundDelay)
+print('\nslots [time, ID, airline] =')
+print(slots)
+
+plotHistogram(arrivals['CTA_min'] / 60, 'Arrivals after the GDP (regulated traffic)')
+
+unrec = unrecoverableDelay(arrivals, GroundDelay)
+total_unrec = sum(u for _, u in unrec)
+print(f'\nUnrecoverable ground delay: {total_unrec:.2f} min')
+print(f'Recoverable ground delay: {delayStats(GroundDelay)[0] - total_unrec:.2f} min')
+
+fuel_air, co2_air, nox_air, sox_air, h2o_air, co_air = airEmissions(
+    arrivals, AirDelay
+)
+fuel_ground, co2_ground, nox_ground, sox_ground, h2o_ground, co_ground = groundEmissions(arrivals, GroundDelay)
+# Càlcul del total d'emissions que NO són CO2 durant el retard a l'aire (en kg)
+non_co2_air = nox_air + sox_air + h2o_air + co_air
+non_co2_ground = nox_ground + sox_ground + h2o_ground + co_ground
+print(f'\nAIR DELAY EMISSIONS:')
+print(f'Fuel: {fuel_air:.2f} kg')
+print(f'CO2: {co2_air:.2f} kg')
+print(f'NOx: {nox_air:.2f} kg')
+print(f'SOx: {sox_air:.2f} kg')
+print(f'H2O (Water Vapour): {h2o_air:.2f} kg')
+print(f'CO: {co_air:.2f} kg')
+print(f'GROUND DELAY EMISSIONS:')
+print(f'Fuel: {fuel_ground:.2f} kg')
+print(f'CO2: {co2_ground:.2f} kg')
+print(f'NOx: {nox_ground:.2f} kg')
+print(f'SOx: {sox_ground:.2f} kg')
+print(f'H2O (Water Vapour): {h2o_ground:.2f} kg')
+print(f'CO: {co_ground:.2f} kg')
+print(f'TOTALS:')
+print(f'Total CO2 due to delay (Air + Ground): {co2_air + co2_ground:.2f} kg')
+print(f'Total Non-CO2 due to air delay: {non_co2_air:.2f} kg')
+print(f'Total Non-CO2 due to ground delay: {non_co2_ground:.2f} kg')
+print(f'Total Non-CO2 overall: {non_co2_air + non_co2_ground:.2f} kg')
+
+# Checkpoint 4: effect of Hfile and radius, heatmaps and optimal values
+hfile_range = np.arange(4, 8.5, 0.5) #Range 4:00 a les 8:00
+radius_range = np.arange(400, 2200, 200)#Radius 400 a 2000
+names = ['Air delay (min)', 'Ground delay (min)', 'Unrecoverable delay (min)',
+         'CO2 air delay (kg)', 'CO2 ground delay (kg)', 'CO2 total (kg)']
+weights = [1, 0, 1, 0, 0, 1]  # KPIs used to choose the optimum (same order as names)
+
+maps = np.zeros((len(names), len(hfile_range), len(radius_range)))
+for i, hfile in enumerate(hfile_range):#Recorrem totes les hores Hfile
+    for j, radius in enumerate(radius_range): #recorre radis index j i el valor r
+        maps[:, i, j] = gdpKPIs(arrivals, hfile, radius, HNoReg)
+        # Cridem la funció amb els parametres actuals hf i r
+
+# Each KPI is scaled to 0-1 so they can be added; the lowest weighted sum is the optimum
+score = np.zeros((len(hfile_range), len(radius_range)))
+# Recreem els KPIs, els seus pesos i els seus noms en paral·lel
+for k in range(len(names)): #va de 0-5 KPIs
+    kpi_map = maps[k] #sera la taula de la KPI indicada amb el valor k.
+    weight = weights[k]
+    name = names[k]    # Si el pes és 0, aquest KPI no influeix en l'optimitat (ens estalviem operacions)
+    if weight == 0:
+        continue
+    min_val = kpi_map.min()
+    max_val = kpi_map.max()
+    avg = max_val - min_val
+    # Normalització Min-Max (escala de 0 a 1)
+    if avg > 0:
+        kpi_normalized = (kpi_map - min_val) / avg
+        score += weight * kpi_normalized
+# Trobem l'índex de la posició amb el score més baix (combinació ideal)
+i_opt, j_opt = np.unravel_index(np.argmin(score), score.shape)
+optimal_hfile = hfile_range[i_opt]
+optimal_radius = radius_range[j_opt]
+
+# Imprimim els resultats òptims per consola
+print(f'Optimal values: Hfile = {optimal_hfile:.1f} h, radius = {optimal_radius} km')
+# Imprimim els valors dels KPIs a la posició òptima
+for k in range(len(names)):
+    print(f'  {names[k]}: {maps[k, i_opt, j_opt]:.2f}')
+
+fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+
+# Convertim els rangs en etiquetes de text netes per als eixos
+x_labels = radius_range
+y_labels = [f'{h:.1f}' for h in hfile_range]
+
+#Flat per agafar els grafics 0,1,2,3,4,5.
+flat_axes = axes.flat
+for k in range(len(names)):
+    kpi_map = maps[k]
+    name = names[k]
+    ax = flat_axes[k]  # Seleccionem el subgràfic k-èssim
+
+    # Dibuixem el heatmap
+    sns.heatmap(
+        kpi_map,
+        ax=ax,
+        cmap='viridis',
+        annot=True,
+        fmt='.0f',
+        annot_kws={'size': 7},
+        xticklabels=x_labels,
+        yticklabels=y_labels
+    )
+
+    # Ressorterm en vermell la casella de la solució òptima
+    optimal_box = plt.Rectangle((j_opt, i_opt), 1, 1, fill=False, edgecolor='red', linewidth=3)
+    ax.add_patch(optimal_box)
+
+    # Detalls estètics
+    ax.set_title(name)
+    ax.set_xlabel('Radius (km)')
+    ax.set_ylabel('Hfile (h)')
+
+plt.tight_layout()
+plt.show()
