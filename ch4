@@ -550,7 +550,7 @@ for k in range(len(names)):
     sns.heatmap(
         kpi_map,
         ax=ax,
-        cmap='viridis',
+        cmap='Blues',
         annot=True,
         fmt='.0f',
         annot_kws={'size': 7},
