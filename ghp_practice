@@ -1,0 +1,47 @@
+from scipy.optimize import linprog
+
+A_ub = [
+    [1,0,0, 1,0,0, 1,0,0, 1,0,0],
+    [0,1,0, 0,1,0, 0,1,0, 0,1,0],
+    [0,0,1, 0,0,1, 0,0,1, 0,0,1]
+]
+b_ub = [1, 2, 1]
+
+A_eq = [
+    [1,1,1, 0,0,0, 0,0,0, 0,0,0],  # FL1
+    [0,0,0, 1,1,1, 0,0,0, 0,0,0],  # FL2
+    [0,0,0, 0,0,0, 1,1,1, 0,0,0],  # FL3
+    [0,0,0, 0,0,0, 0,0,0, 1,1,1]   # FL4
+]
+b_eq = [1, 1, 1, 1]
+
+c = [0, 2, 4,
+     0, 6, 12,
+     999, 0, 2,
+     999, 999, 5]
+
+solution = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=(0, 1), integrality=1)
+print(f"Cost total mínim: {solution.fun:.0f} €")
+
+#Fent-ho amb un bucle la funció de costos.
+slots = [1600, 1602, 1604]
+b_ub = [1, 2, 1]
+vols = [
+    {"ETA": 1600, "r": 1},  # Vol 1
+    {"ETA": 1600, "r": 3},  # Vol 2
+    {"ETA": 1602, "r": 1},  # Vol 3
+    {"ETA": 1603, "r": 5}   # Vol 4
+]
+costmatrix = []
+for vol in vols:
+    for slot in slots:
+        if slot >= vol ["ETA"]:
+            retard = slot - vol["ETA"]
+            cost = vol["r"]*retard #c=r(t-ETA)
+        else:
+            cost = 999
+        costmatrix.append(cost)
+print("\nVector c:",costmatrix)
+
+sol2 = linprog(costmatrix, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=(0, 1), integrality=1)
+print(f"Cost total mínim: {sol2.fun:.0f} €")
