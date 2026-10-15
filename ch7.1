@@ -297,7 +297,7 @@ def computeSlots(HNoReg):
     return np.array(slots, dtype=object)  # columns: slot time, flight ID, airline
 
 
-def determineFlightStatus(arr, Hfile, HNoReg, radius):
+def determineFlightStatus(arrivals, Hfile, HNoReg, radius):
     NotAffected, ExemptRadius, ExemptInternational, ExemptFlying, Controlled = [], [], [], [], []
     for flight_id, flight in arrivals.iterrows():
         if flight['ETA_min'] < Hstart * 60 or flight['ETA_min'] > HNoReg:
