@@ -28,6 +28,8 @@ cancel_delay = 120  # its flights with more than 120 min (2 h) of ground delay a
 max_air_delay = 45  # maximum air delay for exempt flights (min); the GDP already needs 32 min
 ground_limit = 120  # ground delays longer than this are penalised (min)
 ground_penalty = 2  # each minute above ground_limit costs twice as much
+air_weight = 3  # each minute of air delay costs 3 times a ground minute: holding burns much more fuel than the APU
+                # at the gate, and 3 > ground_penalty so air delay is always worse than even a penalised ground delay
 results_folder = os.path.join(os.path.dirname(filename), 'results')  # where results and figures are saved
 
 # APU fuel burnt at the gate (kg/h) per RECAT-EU category (A = largest, F = smallest)
@@ -469,7 +471,7 @@ def delaysFromSlots(slots, Controlled, arrivals):
             AirDelay.append([id, delay])
     return np.array(GroundDelay, dtype=object), np.array(AirDelay, dtype=object), CTA
 
-def solveGHP(arrivals, flights, Exempt, slot_times, max_air=None, limit=None, penalty=1):
+def solveGHP(arrivals, flights, Exempt, slot_times, max_air=None, limit=None, penalty=1, air_weight=1):
     # 1. List every possible pair (flight, slot) and its cost
     pairs = []
     costs = []
@@ -481,7 +483,7 @@ def solveGHP(arrivals, flights, Exempt, slot_times, max_air=None, limit=None, pe
                 continue  # a flight can never arrive before its ETA
             if id in Exempt and max_air is not None and delay > max_air:
                 continue  # exempt flights cannot wait more than max_air in the air
-            cost = delay  # unit cost: rf = 1
+            cost = delay * (air_weight if id in Exempt else 1)  # unit cost (rf = 1); air delay weighted by air_weight
             if id not in Exempt and limit is not None and delay > limit:
                 cost += (penalty - 1) * (delay - limit)  # very long ground delays cost more
             pairs.append([id, k])
@@ -779,12 +781,13 @@ printKPIs('GHP validation (rf = 1, no extra constraints)', GroundDelayV, AirDela
 
 # b) Feasibility constraints: maximum air delay and penalty for very long ground delays
 slotsC, costC = solveGHP(arrivals, affected7, Exempt7, slot_times7,
-                         max_air=max_air_delay, limit=ground_limit, penalty=ground_penalty)
+                         max_air=max_air_delay, limit=ground_limit, penalty=ground_penalty,
+                         air_weight=air_weight)
 if slotsC is None:
     raise ValueError(f'No GHP solution with max_air_delay = {max_air_delay} min: increase it')
 GroundDelayC, AirDelayC, CTA_C = delaysFromSlots(slotsC, Controlled7, arrivals)
 printKPIs(f'GHP with constraints (max air delay {max_air_delay} min, ground delay over {ground_limit} min '
-          f'costs x{ground_penalty})', GroundDelayC, AirDelayC)
+          f'costs x{ground_penalty}, air delay costs x{air_weight})', GroundDelayC, AirDelayC)
 print(f'  Objective function value: {costC:.2f}')
 print(f'  Flights with more than {ground_limit} min of ground delay: '
       f'GDP {sum(d > ground_limit for _, d in GroundDelayGDP7)}, GHP {sum(d > ground_limit for _, d in GroundDelayC)}')
