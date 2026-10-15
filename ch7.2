@@ -24,12 +24,11 @@ radius_opt = 2000  # radius chosen by looking at the heatmaps (km)
 cancel_airline = 'ITY'  # ITA Airways: the airline with most controlled flights at LIRF
 cancel_delay = 120  # its flights with more than 120 min (2 h) of ground delay are cancelled
 
-# Checkpoint 7 (WP3, GHP task 1): feasibility constraints
-max_air_delay = 45  # maximum air delay for exempt flights (min); the GDP already needs 32 min
+# Checkpoint 7
+max_air_delay = 45  # maximum air delay for exempt flights
 ground_limit = 120  # ground delays longer than this are penalised (min)
-ground_penalty = 2  # each minute above ground_limit costs twice as much
-air_weight = 3  # each minute of air delay costs 3 times a ground minute: holding burns much more fuel than the APU
-                # at the gate, and 3 > ground_penalty so air delay is always worse than even a penalised ground delay
+ground_penalty = 2  # cada min>ground_limit conta el doble
+air_weight = 3  # cada min de retard en vol compta el triple que un min a terra
 results_folder = os.path.join(os.path.dirname(filename), 'results')  # where results and figures are saved
 
 # APU fuel burnt at the gate (kg/h) per RECAT-EU category (A = largest, F = smallest)
@@ -472,7 +471,7 @@ def delaysFromSlots(slots, Controlled, arrivals):
     return np.array(GroundDelay, dtype=object), np.array(AirDelay, dtype=object), CTA
 
 def solveGHP(arrivals, flights, Exempt, slot_times, max_air=None, limit=None, penalty=1, air_weight=1):
-    # 1. List every possible pair (flight, slot) and its cost
+    # 1. Llista de totes opcions per vol i slot. Calcula el retard que tindria el vol si aterrés en aquell slot.
     pairs = []
     costs = []
     for id in flights:
@@ -483,8 +482,8 @@ def solveGHP(arrivals, flights, Exempt, slot_times, max_air=None, limit=None, pe
                 continue  # a flight can never arrive before its ETA
             if id in Exempt and max_air is not None and delay > max_air:
                 continue  # exempt flights cannot wait more than max_air in the air
-            cost = delay * (air_weight if id in Exempt else 1)  # unit cost (rf = 1); air delay weighted by air_weight
-            if id not in Exempt and limit is not None and delay > limit:
+            cost = delay * (air_weight if id in Exempt else 1)  # Si el vol està exempt * airweight sino unit cost (rf = 1);
+            if id not in Exempt and limit is not None and delay > limit:#Si no es exempt
                 cost += (penalty - 1) * (delay - limit)  # very long ground delays cost more
             pairs.append([id, k])
             costs.append(cost)
@@ -497,11 +496,13 @@ def solveGHP(arrivals, flights, Exempt, slot_times, max_air=None, limit=None, pe
         id, k = pairs[n]
         A_flights[flight_row[id], n] = 1
         A_slots[k, n] = 1
+    #Cada vol aterra 1 vegada i cada slot max 1 vegada
+    # 1<=Aflights·x<=1   0<=Aslots·x<=1
     constraints = [LinearConstraint(A_flights.tocsr(), 1, 1), LinearConstraint(A_slots.tocsr(), 0, 1)]
 
     # 3. Solve: x = 1 if the flight uses that slot, 0 if not
-    result = milp(c=np.array(costs), constraints=constraints, integrality=np.ones(len(pairs)),
-                  bounds=Bounds(0, 1))
+    #MILP busca el vector binari (0-1) que minimitza el cost total
+    result = milp(c=np.array(costs), constraints=constraints, integrality=np.ones(len(pairs)),bounds=Bounds(0, 1))
     if not result.success:
         print('GHP: no feasible solution found ->', result.message)
         return None, None
@@ -509,7 +510,7 @@ def solveGHP(arrivals, flights, Exempt, slot_times, max_air=None, limit=None, pe
     # 4. Write the solution as a slots table [time, flight ID, airline], like in the GDP
     slots = np.array([[t, 0, 0] for t in slot_times], dtype=object)
     for n in range(len(pairs)):
-        if result.x[n] > 0.5:
+        if result.x[n] > 0.5: #Vol dir que hi ha un 1.
             id, k = pairs[n]
             slots[k, 1] = id
             slots[k, 2] = arrivals.loc[id, 'Compañía']
